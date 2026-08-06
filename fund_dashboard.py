@@ -221,17 +221,30 @@ if data_source == "Auto-fetch (API + yfinance)":
     else:
         selected_names = uc.FUND_LIST
 
-    if meta_errors:
-        st.sidebar.warning(f"⚠️ Couldn't fetch metadata for {len(meta_errors)} fund(s) — see Debug panel.")
-
     with st.spinner(f"Fetching NAV history for {len(selected_names)} fund(s) + benchmarks..."):
         df = dp.build_wide_dataframe(selected_names, meta)
         failed = dp.fetch_failures(selected_names, meta)
+        nav_errors = {n: uc.LAST_NAV_ERRORS.get(meta.get(n, {}).get("scheme_code"))
+                      for n in selected_names
+                      if meta.get(n, {}).get("scheme_code") in uc.LAST_NAV_ERRORS}
+
+    # Surface real failures directly — no need to click into the debug panel.
+    if meta_errors or nav_errors:
+        with st.expander(
+            f"⚠️ {len(meta_errors)} metadata error(s), {len(nav_errors)} NAV-fetch error(s) — click for details",
+            expanded=(df.empty or df.shape[1] <= 1),
+        ):
+            for name, m in meta_errors.items():
+                st.text(f"[metadata] {name}: {m.get('error')}")
+            for name, err in nav_errors.items():
+                st.text(f"[nav history] {name}: {err}")
 
     if df.empty or "Date" not in df.columns or df.shape[1] <= 1:
         st.error(
-            "Couldn't build any NAV series from the API. Open the Debug panel in the "
-            "sidebar, fetch a raw response, and check it matches the expected shape."
+            "Couldn't build any NAV series from the API — every fetch failed. "
+            "Expand the error details above for the actual reason (network block, "
+            "bad response shape, timeout, etc). Common cause on hosted apps: the "
+            "API blocking requests from cloud/datacenter IPs."
         )
         st.stop()
 
