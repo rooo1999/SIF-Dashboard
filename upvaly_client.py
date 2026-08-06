@@ -66,6 +66,9 @@ FLOOR_DATE = dt.date(2020, 1, 1)
 _session = requests.Session()
 _session.headers.update({"User-Agent": "Mozilla/5.0 (fund-dashboard/1.0)"})
 
+# scheme_code -> last error string, for surfacing NAV-fetch failures in the UI
+LAST_NAV_ERRORS: dict = {}
+
 
 def _get(url, params=None, retries=3, timeout=15):
     last_err = None
@@ -203,12 +206,15 @@ def save_scheme_meta_cache(meta: dict):
 
 def get_all_scheme_meta(fund_list=None, force_refresh=False, progress_cb=None) -> dict:
     """Returns {scheme_name: {scheme_code, category, ...}} for every fund in
-    fund_list, using a disk cache so we don't hit the API every run."""
+    fund_list, using a disk cache so we don't hit the API every run.
+    Only successful lookups are cached — a failed lookup is retried on the
+    next run automatically instead of being stuck as a permanent failure."""
     fund_list = fund_list or FUND_LIST
     meta = {} if force_refresh else load_scheme_meta_cache()
     changed = False
     for i, name in enumerate(fund_list):
-        if name not in meta:
+        cached_entry = meta.get(name)
+        if cached_entry is None or not cached_entry.get("scheme_code"):
             try:
                 raw = fetch_scheme_meta_raw(name)
                 parsed = parse_scheme_meta(raw)
@@ -217,11 +223,12 @@ def get_all_scheme_meta(fund_list=None, force_refresh=False, progress_cb=None) -
                 changed = True
             except Exception as e:  # noqa: BLE001
                 meta[name] = {"scheme_code": None, "scheme_name": name, "category": "Unknown", "error": str(e)}
-                changed = True
+                # not marking `changed` for a failure — don't persist a dead
+                # result, so it gets retried next run instead of getting stuck
         if progress_cb:
             progress_cb(i + 1, len(fund_list), name)
     if changed:
-        save_scheme_meta_cache(meta)
+        save_scheme_meta_cache({k: v for k, v in meta.items() if v.get("scheme_code")})
     return meta
 
 
@@ -231,7 +238,9 @@ def _fund_cache_file(scheme_code) -> Path:
 
 def get_full_nav_history(scheme_code, scheme_name="") -> pd.DataFrame:
     """Loads cached NAV history from disk and fetches only the missing
-    (incremental) date range from the API, so repeated runs are cheap."""
+    (incremental) date range from the API, so repeated runs are cheap.
+    Any fetch error is stashed on LAST_NAV_ERRORS[scheme_code] instead of
+    being silently swallowed, so the caller can surface it."""
     cache_file = _fund_cache_file(scheme_code)
     if cache_file.exists():
         cached = pd.read_csv(cache_file, parse_dates=["date"])
@@ -248,6 +257,12 @@ def get_full_nav_history(scheme_code, scheme_name="") -> pd.DataFrame:
         try:
             raw = fetch_nav_range_raw(scheme_code, fetch_start, dt.date.today())
             new_df = parse_nav_entries(raw)
+            if new_df.empty and cached.empty:
+                # got a response but couldn't extract any rows from it —
+                # worth flagging even though it's not an exception
+                LAST_NAV_ERRORS[scheme_code] = "API responded but no NAV rows could be parsed from it (check Debug panel)"
+            else:
+                LAST_NAV_ERRORS.pop(scheme_code, None)
             if not new_df.empty:
                 cached = (
                     pd.concat([cached, new_df], ignore_index=True)
@@ -256,8 +271,9 @@ def get_full_nav_history(scheme_code, scheme_name="") -> pd.DataFrame:
                     .reset_index(drop=True)
                 )
                 cached.to_csv(cache_file, index=False)
-        except Exception:  # noqa: BLE001
-            pass  # fall back to whatever's cached; UI surfaces staleness separately
+        except Exception as e:  # noqa: BLE001
+            LAST_NAV_ERRORS[scheme_code] = str(e)
+            # fall back to whatever's cached
 
     return cached
 
