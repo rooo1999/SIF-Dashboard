@@ -187,27 +187,28 @@ if data_source == "Auto-fetch (API + yfinance)":
     import upvaly_client as uc
     import data_pipeline as dp
 
+    if "refresh_counter" not in st.session_state:
+        st.session_state.refresh_counter = 0
+
     with st.sidebar:
         st.header("Funds")
-        refresh_meta = st.button("🔄 Refresh fund list from API")
+        if st.button("🔄 Refresh fund list & data from API"):
+            st.session_state.refresh_counter += 1
+            dp.load_all_metadata(force_refresh=True)  # eagerly repopulate the metadata disk cache
 
         with st.spinner("Loading fund list & categories..."):
-            meta = dp.load_all_metadata(force_refresh=refresh_meta)
+            meta = dp.load_all_metadata(force_refresh=False)
 
-        meta_errors = {n: m for n, m in meta.items() if m.get("error")}
         categories = sorted({m.get("category", "Unknown") for m in meta.values()})
-
         category_filter = st.multiselect("Filter by category", categories)
         fund_filter = st.multiselect("Or choose specific fund(s)", uc.FUND_LIST)
-
         st.caption("Leave both empty to include every tracked fund. Selecting either narrows the set; selecting both combines them.")
 
         with st.expander("🐞 Debug: raw API response"):
             debug_fund = st.selectbox("Fund to inspect", uc.FUND_LIST)
             if st.button("Fetch raw JSON"):
                 try:
-                    raw = uc.debug_fetch_scheme(debug_fund)
-                    st.json(raw)
+                    st.json(uc.debug_fetch_scheme(debug_fund))
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Request failed: {e}")
 
@@ -221,35 +222,48 @@ if data_source == "Auto-fetch (API + yfinance)":
     else:
         selected_names = uc.FUND_LIST
 
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _cached_fetch(names_key: tuple, refresh_key: int):
+        """Cached on (fund selection, refresh-button click count) — NOT on
+        the date range, since that's filtered client-side afterward. This
+        is what stops every date-slider tweak from re-hitting the network:
+        as long as the fund selection hasn't changed, Streamlit reruns hit
+        this cache instead of re-fetching."""
+        _meta = dp.load_all_metadata(force_refresh=False)
+        _df = dp.build_wide_dataframe(list(names_key), _meta)
+        _failed = dp.fetch_failures(list(names_key), _meta)
+        _nav_errors = {
+            n: uc.LAST_NAV_ERRORS.get(_meta.get(n, {}).get("scheme_code"))
+            for n in names_key
+            if _meta.get(n, {}).get("scheme_code") in uc.LAST_NAV_ERRORS
+        }
+        _meta_errors = {n: m for n, m in _meta.items() if n in names_key and m.get("error")}
+        return _df, _failed, _nav_errors, _meta_errors
+
     with st.spinner(f"Fetching NAV history for {len(selected_names)} fund(s) + benchmarks..."):
-        df = dp.build_wide_dataframe(selected_names, meta)
-        failed = dp.fetch_failures(selected_names, meta)
-        nav_errors = {n: uc.LAST_NAV_ERRORS.get(meta.get(n, {}).get("scheme_code"))
-                      for n in selected_names
-                      if meta.get(n, {}).get("scheme_code") in uc.LAST_NAV_ERRORS}
+        df, failed, nav_errors, meta_errors = _cached_fetch(tuple(selected_names), st.session_state.refresh_counter)
+
+    fetch_ok = not (df.empty or "Date" not in df.columns or df.shape[1] <= 1)
 
     # Surface real failures directly — no need to click into the debug panel.
     if meta_errors or nav_errors:
         with st.expander(
             f"⚠️ {len(meta_errors)} metadata error(s), {len(nav_errors)} NAV-fetch error(s) — click for details",
-            expanded=(df.empty or df.shape[1] <= 1),
+            expanded=not fetch_ok,
         ):
             for name, m in meta_errors.items():
                 st.text(f"[metadata] {name}: {m.get('error')}")
             for name, err in nav_errors.items():
                 st.text(f"[nav history] {name}: {err}")
 
-    if df.empty or "Date" not in df.columns or df.shape[1] <= 1:
-        st.error(
-            "Couldn't build any NAV series from the API — every fetch failed. "
-            "Expand the error details above for the actual reason (network block, "
-            "bad response shape, timeout, etc). Common cause on hosted apps: the "
-            "API blocking requests from cloud/datacenter IPs."
-        )
-        st.stop()
-
     if failed:
         st.sidebar.caption(f"⚪ No scheme code found for: {', '.join(failed)}")
+
+    if not fetch_ok:
+        # Fall back to a placeholder frame so the Date Range / Series
+        # sidebar below still renders instead of vanishing — the error
+        # itself is shown once we reach the main content area.
+        df = pd.DataFrame({"Date": pd.date_range(end=dt.date.today(), periods=2, freq="D")})
 
 else:
     with st.sidebar:
@@ -268,6 +282,7 @@ else:
             st.stop()
 
     df = load_data(file_bytes)
+    fetch_ok = True
 
 funds, benchmarks = get_series_names(df)
 all_cols = funds + benchmarks
@@ -286,6 +301,16 @@ with st.sidebar:
 
     st.header("Series")
     show_benchmarks = st.multiselect("Benchmarks", benchmarks, default=benchmarks)
+
+# Data-fetch failure gets explained here — AFTER the sidebar above has
+# rendered, so a failed API pull no longer makes the whole sidebar vanish.
+if not fetch_ok:
+    st.error(
+        "Couldn't build any NAV series from the API — every fetch failed. "
+        "Expand the error details in the sidebar above for the actual reason "
+        "(server error, network block, bad response shape, etc)."
+    )
+    st.stop()
 
 if start_date >= end_date:
     st.error("Start date must be before end date.")
