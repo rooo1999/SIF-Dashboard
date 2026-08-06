@@ -178,17 +178,16 @@ def fetch_scheme_meta_raw(scheme_name: str) -> dict:
 
 
 def fetch_nav_range_raw(scheme_code, start: dt.date, end: dt.date) -> dict:
+    """Fetches NAV history for a scheme. Confirmed by live testing: hitting
+    this endpoint with no query params returns the fund's FULL history
+    (navHistoryFrom == inception, navHistoryTo == latest) — sending guessed
+    param names (startDate/endDate/from/to) risked the API rejecting or
+    misreading the combination, which is what was breaking NAV fetches. So
+    we intentionally call it bare every time and let local dedupe/caching
+    handle the rest; `start`/`end` are accepted for API-symmetry with the
+    rest of the code but currently unused."""
     url = f"{BASE_URL}/api/mf/scheme-code/{scheme_code}/nav"
-    # Try the most common param naming; if the API uses different names,
-    # this still sends *a* request — check the debug panel if results come
-    # back empty.
-    params = {
-        "startDate": start.isoformat(),
-        "endDate": end.isoformat(),
-        "from": start.isoformat(),
-        "to": end.isoformat(),
-    }
-    return _get(url, params=params)
+    return _get(url)
 
 
 def load_scheme_meta_cache() -> dict:
@@ -253,6 +252,10 @@ def get_full_nav_history(scheme_code, scheme_name="") -> pd.DataFrame:
     else:
         fetch_start = (cached["date"].max() + pd.Timedelta(days=1)).date()
 
+    # fetch_nav_range_raw always returns the FULL history regardless of
+    # fetch_start (see its docstring) — fetch_start here only decides
+    # *whether* to bother re-fetching at all (skip if we already have
+    # today's NAV cached), not what range to request.
     if fetch_start <= dt.date.today():
         try:
             raw = fetch_nav_range_raw(scheme_code, fetch_start, dt.date.today())
