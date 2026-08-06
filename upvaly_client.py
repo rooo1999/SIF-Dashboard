@@ -15,6 +15,7 @@ import json
 import datetime as dt
 from pathlib import Path
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import pandas as pd
@@ -71,15 +72,23 @@ LAST_NAV_ERRORS: dict = {}
 
 
 def _get(url, params=None, retries=3, timeout=15):
+    """Retries on network-level failures (timeouts, connection errors) since
+    those can be transient. Does NOT retry on HTTP error status codes
+    (4xx/5xx) — a 500 right now will still be a 500 in 600ms, so retrying
+    those just wastes time (this was previously costing ~3-4s per failed
+    fund x 30 funds = minutes of dead time on every rerun)."""
     last_err = None
     for attempt in range(retries):
         try:
             resp = _session.get(url, params=params, timeout=timeout)
             resp.raise_for_status()
             return resp.json()
-        except Exception as e:  # noqa: BLE001
+        except requests.exceptions.HTTPError as e:
+            raise RuntimeError(f"GET {url} -> HTTP {e.response.status_code}: {e.response.text[:200]}") from None
+        except Exception as e:  # noqa: BLE001 - network/timeout errors: worth a couple retries
             last_err = e
-            time.sleep(0.6 * (attempt + 1))
+            if attempt < retries - 1:
+                time.sleep(0.4 * (attempt + 1))
     raise RuntimeError(f"GET {url} failed after {retries} attempts: {last_err}")
 
 
@@ -178,16 +187,15 @@ def fetch_scheme_meta_raw(scheme_name: str) -> dict:
 
 
 def fetch_nav_range_raw(scheme_code, start: dt.date, end: dt.date) -> dict:
-    """Fetches NAV history for a scheme. Confirmed by live testing: hitting
-    this endpoint with no query params returns the fund's FULL history
-    (navHistoryFrom == inception, navHistoryTo == latest) — sending guessed
-    param names (startDate/endDate/from/to) risked the API rejecting or
-    misreading the combination, which is what was breaking NAV fetches. So
-    we intentionally call it bare every time and let local dedupe/caching
-    handle the rest; `start`/`end` are accepted for API-symmetry with the
-    rest of the code but currently unused."""
+    """Fetches NAV history for a scheme, requesting the full available
+    range. NOTE: an earlier version called this bare (no params) based on
+    one working sample, but that turned out to 500 on every fund — so this
+    sends a single clean startDate/endDate pair instead of guessing at
+    multiple param names simultaneously. If this still 500s, the response
+    body (now included in the error message) should say why."""
     url = f"{BASE_URL}/api/mf/scheme-code/{scheme_code}/nav"
-    return _get(url)
+    params = {"startDate": start.isoformat(), "endDate": end.isoformat()}
+    return _get(url, params=params)
 
 
 def load_scheme_meta_cache() -> dict:
@@ -203,29 +211,39 @@ def save_scheme_meta_cache(meta: dict):
     META_CACHE_FILE.write_text(json.dumps(meta, indent=2, default=str))
 
 
-def get_all_scheme_meta(fund_list=None, force_refresh=False, progress_cb=None) -> dict:
+def get_all_scheme_meta(fund_list=None, force_refresh=False, progress_cb=None, max_workers=10) -> dict:
     """Returns {scheme_name: {scheme_code, category, ...}} for every fund in
     fund_list, using a disk cache so we don't hit the API every run.
     Only successful lookups are cached — a failed lookup is retried on the
-    next run automatically instead of being stuck as a permanent failure."""
+    next run automatically instead of being stuck as a permanent failure.
+    Uncached names are looked up concurrently."""
     fund_list = fund_list or FUND_LIST
     meta = {} if force_refresh else load_scheme_meta_cache()
     changed = False
-    for i, name in enumerate(fund_list):
-        cached_entry = meta.get(name)
-        if cached_entry is None or not cached_entry.get("scheme_code"):
-            try:
-                raw = fetch_scheme_meta_raw(name)
-                parsed = parse_scheme_meta(raw)
-                parsed.pop("raw", None)
+
+    to_fetch = [n for n in fund_list if not (meta.get(n) or {}).get("scheme_code")]
+
+    def _lookup(name):
+        try:
+            raw = fetch_scheme_meta_raw(name)
+            parsed = parse_scheme_meta(raw)
+            parsed.pop("raw", None)
+            return name, parsed, None
+        except Exception as e:  # noqa: BLE001
+            return name, {"scheme_code": None, "scheme_name": name, "category": "Unknown", "error": str(e)}, e
+
+    if to_fetch:
+        done = 0
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(to_fetch))) as pool:
+            futures = [pool.submit(_lookup, name) for name in to_fetch]
+            for future in as_completed(futures):
+                name, parsed, err = future.result()
                 meta[name] = parsed
-                changed = True
-            except Exception as e:  # noqa: BLE001
-                meta[name] = {"scheme_code": None, "scheme_name": name, "category": "Unknown", "error": str(e)}
-                # not marking `changed` for a failure — don't persist a dead
-                # result, so it gets retried next run instead of getting stuck
-        if progress_cb:
-            progress_cb(i + 1, len(fund_list), name)
+                if err is None:
+                    changed = True
+                done += 1
+                if progress_cb:
+                    progress_cb(done, len(to_fetch), name)
     if changed:
         save_scheme_meta_cache({k: v for k, v in meta.items() if v.get("scheme_code")})
     return meta
@@ -252,10 +270,8 @@ def get_full_nav_history(scheme_code, scheme_name="") -> pd.DataFrame:
     else:
         fetch_start = (cached["date"].max() + pd.Timedelta(days=1)).date()
 
-    # fetch_nav_range_raw always returns the FULL history regardless of
-    # fetch_start (see its docstring) — fetch_start here only decides
-    # *whether* to bother re-fetching at all (skip if we already have
-    # today's NAV cached), not what range to request.
+    # fetch_start/today define the range actually requested from the API
+    # (skips the call entirely if we already have today's NAV cached).
     if fetch_start <= dt.date.today():
         try:
             raw = fetch_nav_range_raw(scheme_code, fetch_start, dt.date.today())
