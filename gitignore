@@ -1,0 +1,15 @@
+# Runtime NAV cache — regenerated automatically on first run, don't commit
+nav_cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS/editor cruft
+.DS_Store
+.vscode/
