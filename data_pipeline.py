@@ -104,6 +104,24 @@ def build_wide_dataframe(selected_fund_names, meta: dict, include_benchmarks=("N
     wide = pd.concat(series_frames, axis=1).sort_index()
     wide.index.name = "Date"
     wide = wide.reset_index()
+
+    # The concat above is an outer join on Date, so any single date where
+    # only *some* series report (a fund's off-calendar entry, a holiday
+    # mismatch between the fund's reporting calendar and NSE, etc.) leaves
+    # every other column NaN on that one row. Forward-filling each column
+    # from its own first real value carries the last known NAV forward
+    # through those stray gaps, so a single missing reporting day doesn't
+    # wipe out an otherwise-complete series in the dashboard's "complete
+    # data across the window" check. We deliberately do NOT fill before a
+    # column's first valid value, so a fund's pre-launch period correctly
+    # stays NaN/excluded rather than being backfilled with nothing.
+    for col in wide.columns:
+        if col == "Date":
+            continue
+        first_valid = wide[col].first_valid_index()
+        if first_valid is not None:
+            wide.loc[first_valid:, col] = wide.loc[first_valid:, col].ffill()
+
     return wide
 
 
