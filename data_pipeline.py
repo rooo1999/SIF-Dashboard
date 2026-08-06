@@ -3,6 +3,7 @@ DataFrame: Date, <fund columns...>, Nifty 50, Nifty 500 — the same shape the
 rest of the dashboard (indexing, trailing returns, etc.) already expects."""
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
@@ -53,19 +54,38 @@ def load_all_metadata(force_refresh=False, progress_cb=None):
     return uc.get_all_scheme_meta(uc.FUND_LIST, force_refresh=force_refresh, progress_cb=progress_cb)
 
 
-def build_wide_dataframe(selected_fund_names, meta: dict, include_benchmarks=("Nifty 50", "Nifty 500")):
+def build_wide_dataframe(selected_fund_names, meta: dict, include_benchmarks=("Nifty 50", "Nifty 500"), max_workers=10):
     """Fetches NAV history for each selected fund + the requested
-    benchmarks and assembles the wide Date-indexed DataFrame."""
+    benchmarks and assembles the wide Date-indexed DataFrame. Fund fetches
+    run concurrently (they're independent HTTP calls) so 30 funds don't
+    take 30x as long as one."""
     labels = build_short_labels(selected_fund_names)
+
+    fetch_targets = [
+        (name, info.get("scheme_code"))
+        for name in selected_fund_names
+        for info in [meta.get(name, {})]
+        if info.get("scheme_code")
+    ]
+
+    results = {}
+    if fetch_targets:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(fetch_targets))) as pool:
+            future_to_name = {
+                pool.submit(uc.get_full_nav_history, code, name): name
+                for name, code in fetch_targets
+            }
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                try:
+                    results[name] = future.result()
+                except Exception:  # noqa: BLE001 - error already captured in uc.LAST_NAV_ERRORS
+                    results[name] = pd.DataFrame(columns=["date", "nav"])
 
     series_frames = []
     for name in selected_fund_names:
-        info = meta.get(name, {})
-        code = info.get("scheme_code")
-        if not code:
-            continue
-        hist = uc.get_full_nav_history(code, scheme_name=name)
-        if hist.empty:
+        hist = results.get(name)
+        if hist is None or hist.empty:
             continue
         col = labels[name]
         s = hist.set_index("date")["nav"].rename(col)
