@@ -294,13 +294,19 @@ if df["Date"].isna().all() or df.empty:
 min_date = df["Date"].min().date()
 max_date = df["Date"].max().date()
 
+# Default start date is 2025-12-31, clamped into whatever range the data
+# actually has (falls back to min_date if the data doesn't go back that far).
+DEFAULT_START = dt.date(2025, 12, 31)
+default_start = min(max(DEFAULT_START, min_date), max_date)
+
 with st.sidebar:
     st.header("Date Range")
-    start_date = st.date_input("Start date", value=min_date, min_value=min_date, max_value=max_date)
+    start_date = st.date_input("Start date", value=default_start, min_value=min_date, max_value=max_date)
     end_date = st.date_input("End date", value=max_date, min_value=min_date, max_value=max_date)
 
     st.header("Series")
-    show_benchmarks = st.multiselect("Benchmarks", benchmarks, default=benchmarks)
+    default_benchmarks = [b for b in benchmarks if b == "Nifty 50"] or benchmarks
+    show_benchmarks = st.multiselect("Benchmarks", benchmarks, default=default_benchmarks)
 
 # Data-fetch failure gets explained here — AFTER the sidebar above has
 # rendered, so a failed API pull no longer makes the whole sidebar vanish.
