@@ -425,7 +425,7 @@ with st.expander("ℹ️ How this works"):
 """
     )
 
-#- **Auto-fetch mode**: fund NAVs come from the finapi.upvaly.com API (scheme lookup +
+# **Auto-fetch mode**: fund NAVs come from the finapi.upvaly.com API (scheme lookup +
   full NAV history), Nifty 50 / Nifty 500 come from yfinance. Each fund/benchmark's
   history is cached to disk after the first fetch, so later runs only pull the new days
   since your last run instead of re-downloading everything.
