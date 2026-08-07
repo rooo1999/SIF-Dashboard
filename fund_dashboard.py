@@ -12,6 +12,10 @@ Nifty 50 / Nifty 500 benchmarks. Pick a start and end date, and the app:
 5. Shows a trailing-returns table (1D, 1W, 1M, 3M, 6M, 1Y, 3Y, 5Y, Since
    Inception) computed from the FULL history of each fund (not just the
    selected window), so returns are always as-of the selected end date.
+6. # **Auto-fetch mode**: fund NAVs come from the finapi.upvaly.com API (scheme lookup +
+   full NAV history), Nifty 50 / Nifty 500 come from yfinance. Each fund/benchmark's
+   history is cached to disk after the first fetch, so later runs only pull the new days
+   since your last run instead of re-downloading everything.
 
 Run with:  streamlit run fund_dashboard.py
 """
@@ -424,8 +428,3 @@ with st.expander("ℹ️ How this works"):
   the two combine rather than override each other.
 """
     )
-
-# **Auto-fetch mode**: fund NAVs come from the finapi.upvaly.com API (scheme lookup +
-  full NAV history), Nifty 50 / Nifty 500 come from yfinance. Each fund/benchmark's
-  history is cached to disk after the first fetch, so later runs only pull the new days
-  since your last run instead of re-downloading everything.
