@@ -419,12 +419,13 @@ with st.expander("ℹ️ How this works"):
   will simply show blanks for 3Y/5Y until enough history accumulates.
 - **New fund launches**: as new funds get listed in future updates of the sheet, they'll
   automatically show up here — no code changes needed.
-- **Auto-fetch mode**: fund NAVs come from the finapi.upvaly.com API (scheme lookup +
-  full NAV history), Nifty 50 / Nifty 500 come from yfinance. Each fund/benchmark's
-  history is cached to disk after the first fetch, so later runs only pull the new days
-  since your last run instead of re-downloading everything.
 - **Category & fund filters**: leave both sidebar boxes empty to see every tracked fund;
   picking a category includes all funds in it, picking specific funds adds those too —
   the two combine rather than override each other.
 """
     )
+
+#- **Auto-fetch mode**: fund NAVs come from the finapi.upvaly.com API (scheme lookup +
+  full NAV history), Nifty 50 / Nifty 500 come from yfinance. Each fund/benchmark's
+  history is cached to disk after the first fetch, so later runs only pull the new days
+  since your last run instead of re-downloading everything.
