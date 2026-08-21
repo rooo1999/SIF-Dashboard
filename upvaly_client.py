@@ -287,59 +287,6 @@ def parse_nav_entries(raw) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # Public fetch functions
 # --------------------------------------------------------------------------
-def _name_variants(base_name: str):
-    """AMCs are inconsistent about hyphen/space formatting around 'Long
-    Short' and 'Ex Top' (e.g. 'Long-Short' vs 'Long - Short' vs 'Long
-    Short') — the API does exact matching on whichever form it has on file,
-    so generate the plausible spellings and let the caller try each until
-    one isn't a 404. Order: original first, then generated variants."""
-    import itertools
-
-    variable_re = re.compile(r"(Long\s*-?\s*Short|Ex\s*-?\s*Top)", re.IGNORECASE)
-    spans = list(variable_re.finditer(base_name))
-    if not spans:
-        return [base_name]
-
-    def forms(match_text: str):
-        words = re.split(r"\s*-?\s*", match_text.strip())
-        words = [w for w in words if w]
-        joined = " ".join(words)
-        return [joined, joined.replace(" ", "-", 1), "-".join(words)]
-
-    per_span_forms = [forms(m.group(0)) for m in spans]
-    variants = []
-    for combo in itertools.product(*per_span_forms):
-        rebuilt = base_name
-        for m, replacement in zip(reversed(spans), reversed(combo)):
-            rebuilt = rebuilt[: m.start()] + replacement + rebuilt[m.end() :]
-        # (spans processed in reverse so earlier offsets stay valid)
-        if rebuilt not in variants:
-            variants.append(rebuilt)
-
-    # Ensure the original, un-modified name is tried first.
-    if base_name in variants:
-        variants.remove(base_name)
-    return [base_name] + variants
-
-
-def fetch_scheme_meta_raw_with_retry(scheme_name: str, plan: str = "Regular Plan", option: str = "Growth Option"):
-    """Same as fetch_scheme_meta_raw, but on a 404 (name not found) retries
-    with common hyphen/spacing variants before giving up. Returns
-    (raw_json, name_that_worked). Non-404 errors (network, 500s, etc.)
-    propagate immediately without retrying variants."""
-    bare_name = split_scheme_name(scheme_name)
-    last_err = None
-    for candidate in _name_variants(bare_name):
-        try:
-            url = f"{BASE_URL}/api/mf/scheme-name/{quote(candidate, safe='')}"
-            return _get(url, params={"plan": plan, "option": option}), candidate
-        except RuntimeError as e:
-            last_err = e
-            if "HTTP 404" not in str(e):
-                raise  # only 404s are worth retrying variants for
-    raise last_err
-
-
 def fetch_scheme_meta_by_isin(isin: str) -> dict:
     """Primary metadata lookup: GET /api/mf/isin/{isin}. ISIN is a stable,
     exact identifier — no plan/option text-matching involved, so this
@@ -408,7 +355,7 @@ def get_all_scheme_meta(fund_list=None, force_refresh=False, progress_cb=None, m
 
     def _lookup(name):
         try:
-            raw, matched_name = fetch_scheme_meta_raw_with_retry(name)
+            raw = fetch_scheme_meta_raw(name)
             parsed = parse_scheme_meta(raw)
             parsed.pop("raw", None)
             return name, parsed, None
