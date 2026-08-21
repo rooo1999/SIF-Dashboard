@@ -193,8 +193,7 @@ if data_source == "Auto-fetch (API + yfinance)":
 
     if uc.MISSING_API_KEY:
         st.caption(
-            "ℹ️ No `UPVALY_API_KEY` set — using the free tier (no signup "
-            "required). Set one only if you upgrade to Pro or hit rate limits."
+            "ℹ️"
         )
 
     if "refresh_counter" not in st.session_state:
