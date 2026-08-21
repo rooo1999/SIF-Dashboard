@@ -179,6 +179,12 @@ st.caption(
     "starting point of 100, against Nifty 50 and Nifty 500."
 )
 
+if uc.MISSING_API_KEY:
+    st.caption(
+        "ℹ️ No `UPVALY_API_KEY` set — using the free tier (no signup "
+        "required). Set one only if you upgrade to Pro or hit rate limits."
+    )
+
 with st.sidebar:
     st.header("Data source")
     data_source = st.radio(
