@@ -61,42 +61,6 @@ FUND_LIST = [
     "Titanium Hybrid Long-Short Fund Regular Plan Growth",
 ]
 
-# scheme_name -> ISIN, used as the primary metadata lookup key (stable/exact —
-# no guessing at plan/option text formatting needed). Source: AMFI SIF NAV
-# name list matched 1:1 against FUND_LIST.
-FUND_ISIN_MAP = {
-    "Altiva Equity Ex- Top 100 Long - Short Fund - Regular Plan - Growth": "INF754K30136",
-    "DynaSIF Equity Ex-Top 100 Long - Short Fund - Regular Plan - Growth Option": "INF579M30133",
-    "iSIF Equity Ex-Top 100 Long-Short Fund - Growth": "INF109K30034",
-    "qsif Equity Ex-Top 100 Long-Short Fund - Growth Option - Regular Plan": "INF966L30183",
-    "WSIF Equity Ex-Top 100 Long-Short Fund - Regular Growth": "INF2F0030015",
-    "Arthaya Equity Long Short Fund - Regular Plan - Growth Option": "INF582M30012",
-    "Arudha Equity Long-Short Fund-Regular Plan-Growth": "INF194K30358",
-    "Diviniti Equity Long Short Fund - Regular Plan Growth Option": "INF00XX30019",
-    "DynaSIF Equity Long - Short Fund - Regular Plan - Growth Option": "INF579M30018",
-    "iSIF Equity Long-Short Fund - Growth": "INF109K30075",
-    "qsif Equity Long Short Fund - Growth Option - Regular Plan": "INF966L30027",
-    "Sapphire Equity Long-Short SIF - Growth": "INF090I30014",
-    "Summit Equity Long-Short Fund - Regular Plan - Growth": "INF205K30014",
-    "Titanium Equity Long-Short Fund Regular Growth": "INF277K30070",
-    "WSIF Equity Long-Short Fund - Regular Growth": "INF2F0030072",
-    "qsif Sector Rotation Long-Short Fund - Growth Option - RegularPlan": "INF966L30308",
-    "DynaSIF Active Asset Allocator Long-Short Fund - Regular Plan - Growth Option": "INF579M30075",
-    "iSIF Active Asset Allocator Long-Short Fund - Growth": "INF109K30059",
-    "qsif Active Asset Allocator Long-Short Fund - Growth Option - Regular Plan": "INF966L30217",
-    "Altiva Hybrid Long-Short Fund - Regular Plan - Growth": "INF754K30052",
-    "Apex Hybrid Long-Short Fund - Regular - Growth": "INF209K30040",
-    "Arudha Hybrid Long-Short Fund-Regular Plan-Growth": "INF194K30010",
-    "INFINITY HYBRID LONG-SHORT FUND-REGULAR - GROWTH": "INF174K30046",
-    "iSIF Hybrid Long-Short Fund - Growth": "INF109K30018",
-    "Magnum Hybrid Long Short Fund - Regular Plan - Growth": "INF200K30015",
-    "Platinum Hybrid Long-Short Fund - Regular Plan - Growth": "INF769K30019",
-    "Prism Hybrid Long-Short Fund - Regular Plan- Growth Option": "INF22M030019",
-    "qsif Hybrid Long-Short Fund - Growth Option - Regular Plan": "INF966L30084",
-    "RedHex Hybrid Long-Short Fund - Regular - Growth": "INF336L30015",
-    "Titanium Hybrid Long-Short Fund Regular Plan Growth": "INF277K30013",
-}
-
 # Earliest date to ask the API for when we have no cache yet. These are all
 # newly launched SIFs (~late 2025), but this is set conservatively low in
 # case older/other schemes get added later.
@@ -287,83 +251,20 @@ def parse_nav_entries(raw) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # Public fetch functions
 # --------------------------------------------------------------------------
-def _name_variants(base_name: str):
-    """AMCs are inconsistent about hyphen/space formatting around 'Long
-    Short' and 'Ex Top' (e.g. 'Long-Short' vs 'Long - Short' vs 'Long
-    Short') — the API does exact matching on whichever form it has on file,
-    so generate the plausible spellings and let the caller try each until
-    one isn't a 404. Order: original first, then generated variants."""
-    import itertools
-
-    variable_re = re.compile(r"(Long\s*-?\s*Short|Ex\s*-?\s*Top)", re.IGNORECASE)
-    spans = list(variable_re.finditer(base_name))
-    if not spans:
-        return [base_name]
-
-    def forms(match_text: str):
-        words = re.split(r"\s*-?\s*", match_text.strip())
-        words = [w for w in words if w]
-        joined = " ".join(words)
-        return [joined, joined.replace(" ", "-", 1), "-".join(words)]
-
-    per_span_forms = [forms(m.group(0)) for m in spans]
-    variants = []
-    for combo in itertools.product(*per_span_forms):
-        rebuilt = base_name
-        for m, replacement in zip(reversed(spans), reversed(combo)):
-            rebuilt = rebuilt[: m.start()] + replacement + rebuilt[m.end() :]
-        # (spans processed in reverse so earlier offsets stay valid)
-        if rebuilt not in variants:
-            variants.append(rebuilt)
-
-    # Ensure the original, un-modified name is tried first.
-    if base_name in variants:
-        variants.remove(base_name)
-    return [base_name] + variants
-
-
-def fetch_scheme_meta_raw_with_retry(scheme_name: str, plan: str = "Regular Plan", option: str = "Growth Option"):
-    """Same as fetch_scheme_meta_raw, but on a 404 (name not found) retries
-    with common hyphen/spacing variants before giving up. Returns
-    (raw_json, name_that_worked). Non-404 errors (network, 500s, etc.)
-    propagate immediately without retrying variants."""
-    bare_name = split_scheme_name(scheme_name)
-    last_err = None
-    for candidate in _name_variants(bare_name):
-        try:
-            url = f"{BASE_URL}/api/mf/scheme-name/{quote(candidate, safe='')}"
-            return _get(url, params={"plan": plan, "option": option}), candidate
-        except RuntimeError as e:
-            last_err = e
-            if "HTTP 404" not in str(e):
-                raise  # only 404s are worth retrying variants for
-    raise last_err
-
-
-def fetch_scheme_meta_by_isin(isin: str) -> dict:
-    """Primary metadata lookup: GET /api/mf/isin/{isin}. ISIN is a stable,
-    exact identifier — no plan/option text-matching involved, so this
-    sidesteps every formatting inconsistency in FUND_LIST entirely."""
-    url = f"{BASE_URL}/api/mf/isin/{quote(isin, safe='')}"
-    return _get(url)
-
-
 def fetch_scheme_meta_raw(scheme_name: str, plan: str = "Regular Plan", option: str = "Growth Option") -> dict:
-    """Looks up metadata for a FUND_LIST-style scheme name. Uses the ISIN
-    endpoint when the name is in FUND_ISIN_MAP (exact match, no guessing);
-    falls back to the name/plan/option endpoint otherwise — kept as a
-    fallback in case a fund is ever added to FUND_LIST without an ISIN.
+    """The API (as of the 2026 revamp) takes the *bare* scheme name as the
+    path segment and requires 'plan' and 'option' as separate, required
+    query params — e.g. schemeName='Altiva Equity Ex- Top 100 Long - Short
+    Fund', plan='Regular Plan', option='Growth Option'. No API key is used
+    here (this dashboard only calls the free tier, which doesn't require
+    one; add an X-API-Key header via _session.headers.update(...) if that
+    changes).
 
-    The fallback path: the API takes the *bare* scheme name as the path
-    segment plus required 'plan'/'option' query params — e.g.
-    schemeName='Altiva Equity Ex- Top 100 Long - Short Fund',
-    plan='Regular Plan', option='Growth Option'. `scheme_name` may be passed
-    either bare or as a full FUND_LIST entry with the plan/option baked into
-    the tail — split_scheme_name() strips that tail if present.
+    `scheme_name` may be passed either as the bare name or as a full
+    FUND_LIST-style entry with the plan/option baked into the tail (e.g.
+    '... - Regular Plan - Growth') — split_scheme_name() strips that tail
+    if present, so callers don't need to worry about which form they have.
     """
-    isin = FUND_ISIN_MAP.get(scheme_name)
-    if isin:
-        return fetch_scheme_meta_by_isin(isin)
     bare_name = split_scheme_name(scheme_name)
     url = f"{BASE_URL}/api/mf/scheme-name/{quote(bare_name, safe='')}"
     return _get(url, params={"plan": plan, "option": option})
@@ -408,7 +309,7 @@ def get_all_scheme_meta(fund_list=None, force_refresh=False, progress_cb=None, m
 
     def _lookup(name):
         try:
-            raw, matched_name = fetch_scheme_meta_raw_with_retry(name)
+            raw = fetch_scheme_meta_raw(name)
             parsed = parse_scheme_meta(raw)
             parsed.pop("raw", None)
             return name, parsed, None
