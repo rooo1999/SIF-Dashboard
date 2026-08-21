@@ -10,6 +10,8 @@ Streamlit app let you see the actual JSON. If a fund's category or NAV
 history isn't parsing correctly, grab that raw JSON and it's a one-line fix.
 """
 
+import os
+import re
 import time
 import json
 import datetime as dt
@@ -71,6 +73,32 @@ _session.headers.update({"User-Agent": "Mozilla/5.0 (fund-dashboard/1.0)"})
 LAST_NAV_ERRORS: dict = {}
 
 
+def _get_api_key():
+    """Reads the API key from (in order): the UPVALY_API_KEY env var, or
+    Streamlit secrets if running under Streamlit and a secrets.toml is
+    configured. NOT required for free-tier access (no signup needed) — this
+    is only useful if you upgrade to Pro (full field set) or start hitting
+    rate limits on the free tier. Set it with either:
+      export UPVALY_API_KEY="your-key-here"
+    or a .streamlit/secrets.toml containing:
+      UPVALY_API_KEY = "your-key-here"
+    Returns None if no key is configured, which is the expected default."""
+    key = os.environ.get("UPVALY_API_KEY")
+    if key:
+        return key
+    try:
+        import streamlit as st
+        return st.secrets.get("UPVALY_API_KEY")
+    except Exception:  # noqa: BLE001 - not running under Streamlit, or no secrets.toml
+        return None
+
+
+_api_key = _get_api_key()
+if _api_key:
+    _session.headers.update({"X-API-Key": _api_key})
+MISSING_API_KEY = _api_key is None
+
+
 def _get(url, params=None, retries=3, timeout=15):
     """Retries on network-level failures (timeouts, connection errors) since
     those can be transient. Does NOT retry on HTTP error status codes
@@ -84,7 +112,13 @@ def _get(url, params=None, retries=3, timeout=15):
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.HTTPError as e:
-            raise RuntimeError(f"GET {url} -> HTTP {e.response.status_code}: {e.response.text[:200]}") from None
+            hint = ""
+            if e.response.status_code in (401, 403):
+                hint = (
+                    " (unexpected for free tier, which needs no key — check the "
+                    "response body for the actual cause)"
+                )
+            raise RuntimeError(f"GET {url} -> HTTP {e.response.status_code}{hint}: {e.response.text[:200]}") from None
         except Exception as e:  # noqa: BLE001 - network/timeout errors: worth a couple retries
             last_err = e
             if attempt < retries - 1:
@@ -121,6 +155,31 @@ CATEGORY_KEYS = [
 NAME_KEYS = ["schemeName", "scheme_name", "name"]
 INCEPTION_KEYS = ["inceptionDate", "inception_date"]
 FUND_HOUSE_KEYS = ["fundHouse", "fund_house", "companyName"]
+# Extra fields the current (2026) API returns that aren't used elsewhere in
+# the dashboard yet, but are cheap to capture for the debug panel / future use.
+PLAN_NAME_KEYS = ["planName", "plan_name", "plan"]
+OPTION_NAME_KEYS = ["optionName", "option_name", "option"]
+BENCHMARK_KEYS = ["benchmarkIndex", "benchmark_index", "benchmark"]
+AUM_KEYS = ["aum"]
+EXPENSE_RATIO_KEYS = ["expenseRatio", "expense_ratio"]
+EXIT_LOAD_KEYS = ["exitLoadMessage", "exit_load_message", "exitLoad"]
+
+# Tokens that indicate plan/option, stripped from the tail of a FUND_LIST
+# entry to recover the "bare" scheme name the API now wants as a separate
+# path segment (plan and option are now their own required query params).
+_PLAN_OPTION_TOKEN = r"(?:Regular\s*Plan|Direct\s*Plan|Regular|Direct|Growth\s*Option|Growth|Option)"
+_SEP = r"(?:\s*-\s*|\s+)"
+_TAIL_RE = re.compile(rf"(?:{_SEP}{_PLAN_OPTION_TOKEN})+\s*$", re.IGNORECASE)
+
+
+def split_scheme_name(full_name: str) -> str:
+    """'Altiva Equity Ex- Top 100 Long - Short Fund - Regular Plan - Growth'
+    -> 'Altiva Equity Ex- Top 100 Long - Short Fund'. Every FUND_LIST entry
+    encodes plan=Regular Plan / option=Growth Option in varying, inconsistent
+    text formats (some say 'Regular', some omit it entirely, word order
+    varies) — this strips all of that from the tail, since plan/option are
+    now sent as their own query params instead."""
+    return _TAIL_RE.sub("", full_name).strip(" -")
 NAV_LIST_WRAPPER_KEYS = ["navHistory", "nav_history", "history", "navs", "data", "result", "nav"]
 NAV_DATE_KEYS = ["date", "navDate", "nav_date", "asOfDate", "as_of_date"]
 NAV_VALUE_KEYS = ["nav", "navValue", "nav_value", "value", "netAssetValue"]
@@ -141,9 +200,20 @@ def parse_scheme_meta(raw: dict) -> dict:
     name = _first_key(payload, NAME_KEYS)
     inception = _first_key(payload, INCEPTION_KEYS)
     fund_house = _first_key(payload, FUND_HOUSE_KEYS)
+    # Captured for the debug panel / possible future use — not consumed by
+    # the rest of the dashboard yet.
+    plan_name = _first_key(payload, PLAN_NAME_KEYS)
+    option_name = _first_key(payload, OPTION_NAME_KEYS)
+    benchmark_index = _first_key(payload, BENCHMARK_KEYS)
+    aum = _first_key(payload, AUM_KEYS)
+    expense_ratio = _first_key(payload, EXPENSE_RATIO_KEYS)
+    exit_load = _first_key(payload, EXIT_LOAD_KEYS)
     return {
         "scheme_code": code, "scheme_name": name, "category": category,
-        "inception_date": inception, "fund_house": fund_house, "raw": raw,
+        "inception_date": inception, "fund_house": fund_house,
+        "plan_name": plan_name, "option_name": option_name,
+        "benchmark_index": benchmark_index, "aum": aum,
+        "expense_ratio": expense_ratio, "exit_load": exit_load, "raw": raw,
     }
 
 
@@ -181,9 +251,23 @@ def parse_nav_entries(raw) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # Public fetch functions
 # --------------------------------------------------------------------------
-def fetch_scheme_meta_raw(scheme_name: str) -> dict:
-    url = f"{BASE_URL}/api/mf/scheme-name/{quote(scheme_name, safe='')}"
-    return _get(url)
+def fetch_scheme_meta_raw(scheme_name: str, plan: str = "Regular Plan", option: str = "Growth Option") -> dict:
+    """The API (as of the 2026 revamp) takes the *bare* scheme name as the
+    path segment and requires 'plan' and 'option' as separate, required
+    query params — e.g. schemeName='Altiva Equity Ex- Top 100 Long - Short
+    Fund', plan='Regular Plan', option='Growth Option'. No API key is used
+    here (this dashboard only calls the free tier, which doesn't require
+    one; add an X-API-Key header via _session.headers.update(...) if that
+    changes).
+
+    `scheme_name` may be passed either as the bare name or as a full
+    FUND_LIST-style entry with the plan/option baked into the tail (e.g.
+    '... - Regular Plan - Growth') — split_scheme_name() strips that tail
+    if present, so callers don't need to worry about which form they have.
+    """
+    bare_name = split_scheme_name(scheme_name)
+    url = f"{BASE_URL}/api/mf/scheme-name/{quote(bare_name, safe='')}"
+    return _get(url, params={"plan": plan, "option": option})
 
 
 def fetch_nav_range_raw(scheme_code, start: dt.date, end: dt.date) -> dict:
