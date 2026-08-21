@@ -179,12 +179,6 @@ st.caption(
     "starting point of 100, against Nifty 50 and Nifty 500."
 )
 
-if uc.MISSING_API_KEY:
-    st.caption(
-        "ℹ️ No `UPVALY_API_KEY` set — using the free tier (no signup "
-        "required). Set one only if you upgrade to Pro or hit rate limits."
-    )
-
 with st.sidebar:
     st.header("Data source")
     data_source = st.radio(
@@ -196,6 +190,12 @@ with st.sidebar:
 if data_source == "Auto-fetch (API + yfinance)":
     import upvaly_client as uc
     import data_pipeline as dp
+
+    if uc.MISSING_API_KEY:
+        st.caption(
+            "ℹ️ No `UPVALY_API_KEY` set — using the free tier (no signup "
+            "required). Set one only if you upgrade to Pro or hit rate limits."
+        )
 
     if "refresh_counter" not in st.session_state:
         st.session_state.refresh_counter = 0
